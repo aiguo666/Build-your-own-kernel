@@ -57,7 +57,8 @@ on:
           - "android15_6.6_66_2025-02_"
           - "android15_6.6_77_2025-03_"
           - "android15_6.6_X_lts_"
-        default: "android14_6.1_75_2024-05_"
+          - "android16_6.12_23_2026-03_"
+        default: "android16_6.12_23_2026"
       kernelsu_branch:
         description: "选择SukiSU功能分支"
         required: true
@@ -242,7 +243,7 @@ jobs:
           ANYKERNEL_BRANCH="gki-2.0"
           SUSFS_BRANCH="gki-${{ env.SELECTED_ANDROID_VERSION }}-${{ env.SELECTED_KERNEL_VERSION }}"
           git clone https://github.com/WildPlusKernel/AnyKernel3.git -b "$ANYKERNEL_BRANCH" AnyKernel3
-          git clone https://github.com/ShirkNeko/susfs4ksu.git -b "$SUSFS_BRANCH" susfs4ksu
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH" susfs4ksu
           git clone https://github.com/WildPlusKernel/kernel_patches.git kernel_patches
           git clone https://github.com/ShirkNeko/SukiSU_patch.git SukiSU_patch
       - name: 同步内核源码
