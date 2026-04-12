@@ -56,6 +56,7 @@ on:
           - "android15_6.6_58_2025-01_"
           - "android15_6.6_66_2025-02_"
           - "android15_6.6_77_2025-03_"
+          - "android15_6.6_89__"
           - "android15_6.6_X_lts_"
         default: "android14_6.1_75_2024-05_"
       kernelsu_branch:
