@@ -332,7 +332,7 @@ jobs:
           # SukiSU 已删除 susfs-test / susfs-main 分支; 带 SUSFS 支持的是 builtin 分支
           SUKI_BRANCH="${{ github.event.inputs.kernelsu_branch }}"
           echo "Using SukiSU branch: ${SUKI_BRANCH}"
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash "$SUKI_BRANCH"
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$SUKI_BRANCH"H"
 
           if [ ! -d "KernelSU" ]; then
             echo "::error::SukiSU 源码目录不存在, 集成失败"
