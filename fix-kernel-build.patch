@@ -1,0 +1,1010 @@
+diff --git a/.github/workflows/build kernel.yml b/.github/workflows/build kernel.yml
+index f1eced3..cc3d995 100644
+--- a/.github/workflows/build kernel.yml	
++++ b/.github/workflows/build kernel.yml	
+@@ -15,6 +15,7 @@ on:
+         required: true
+         type: choice
+         options:
++          # ===== 5.10 (android12/13) =====
+           - "android12_5.10_168_2023-04_r9"
+           - "android12_5.10_198_2024-01_r17"
+           - "android12_5.10_205_2024-03_r9"
+@@ -31,6 +32,7 @@ on:
+           - "android13_5.10_223_2024-11_"
+           - "android13_5.10_228_2025-01_"
+           - "android13_5.10_X_lts_"
++          # ===== 5.15 (android13/14) =====
+           - "android13_5.15_123_2023-11_"
+           - "android13_5.15_137_2024-01_"
+           - "android13_5.15_144_2024-03_"
+@@ -48,35 +50,50 @@ on:
+           - "android14_5.15_158_2024-08_"
+           - "android14_5.15_167_2024-11_"
+           - "android14_5.15_170_2025-01_"
++          # ===== 6.1 (android14) =====
+           - "android14_6.1_75_2024-05_"
+           - "android14_6.1_118_2025-01_"
++          # ===== 6.6 (android15) =====
+           - "android15_6.6_50_2024-10_"
+           - "android15_6.6_56_2024-11_"
+           - "android15_6.6_57_2024-12_"
+           - "android15_6.6_58_2025-01_"
+           - "android15_6.6_66_2025-02_"
+           - "android15_6.6_77_2025-03_"
++          - "android15_6.6_98_2025-09_"
++          - "android15_6.6_102_2025-10_"
++          - "android15_6.6_118_2026-01_"
++          - "android15_6.6_127_2026-04_"
++          - "android15_6.6_139_2026-07_"
++          - "android15_6.6_143_2026-10_"
+           - "android15_6.6_X_lts_"
+-        default: "android14_6.1_75_2024-05_"
++          # ===== 6.12 (android16) =====
++          - "android16_6.12_38_2025-09_"
++          - "android16_6.12_58_2025-12_"
++          - "android16_6.12_69_2026-03_"
++          - "android16_6.12_81_2026-06_"
++          - "android16_6.12_92_2026-09_"
++          - "android16_6.12_X_lts_"
++        default: "android15_6.6_143_2026-10_"
+       kernelsu_branch:
+-        description: "选择SukiSU功能分支"
++        description: "选择 SukiSU 分支（builtin 含 SUSFS，main 为官方主线）"
+         required: true
+         type: choice
+         options:
+-          - Stable
+-          - Dev
+-        default: Dev
++          - builtin
++          - main
++        default: builtin
+       custom_version_suffix:
+         description: '自定义内核内部版本后缀(uname -r), 留空则使用默认值'
+         required: false
+         type: string
+       use_zram:
+-        description: '启用额外ZRAM算法'
++        description: '启用额外ZRAM算法(lz4kd/lz4k_oplus, 仅5.10~6.6)'
+         required: true
+         type: boolean
+         default: true
+       use_kpm:
+-        description: '启用KPM功能'
++        description: '启用KPM功能(6.6/6.12 的 Bazel 构建强制关闭)'
+         required: true
+         type: boolean
+         default: false
+@@ -109,7 +126,8 @@ jobs:
+       CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
+       CCACHE_NOHASHDIR: "true"
+       CCACHE_HARDLINK: "true"
+-      BAZEL_OPTIMIZATION_FLAGS: "--jobs=$(nproc) --local_ram_resources=HOST_RAM*0.8"
++      # 注意: --local_ram_resources 在较新的 Bazel 上已被移除, 统一改用 --local_resources
++      BAZEL_OPTIMIZATION_FLAGS: "--jobs=$(nproc) --local_resources=memory=HOST_RAM*.8"
+       CCACHE_LOGFILE: /tmp/ccache.log
+       BAZEL_PROFILE_FILENAME: bazel_profile.json
+       DEBIAN_FRONTEND: noninteractive
+@@ -122,11 +140,16 @@ jobs:
+             echo "::error::'kernel_to_build' input is empty."
+             exit 1
+           fi
++
+       - name: 解析内核参数
+         id: parse_kernel
+         run: |
+           set -euo pipefail
+           IFS='_' read -r av kv sl opl rev_raw <<< "${{ github.event.inputs.kernel_to_build }}"
++          if [[ -z "$av" || -z "$kv" || -z "$sl" ]]; then
++            echo "::error::无法解析内核版本: ${{ github.event.inputs.kernel_to_build }}"
++            exit 1
++          fi
+           echo "SELECTED_ANDROID_VERSION=$av" >> $GITHUB_ENV
+           echo "SELECTED_KERNEL_VERSION=$kv" >> $GITHUB_ENV
+           echo "SELECTED_SUB_LEVEL=$sl" >> $GITHUB_ENV
+@@ -135,6 +158,7 @@ jobs:
+           echo "SELECTED_REVISION=$rev" >> $GITHUB_ENV
+           echo "parsed_kernel_version=$kv" >> $GITHUB_OUTPUT
+           echo "parsed_sub_level=$sl" >> $GITHUB_OUTPUT
++
+       - name: 设置核心路径
+         id: set_core_paths
+         run: |
+@@ -146,18 +170,20 @@ jobs:
+           GKI_DEFCONFIG_FILE_PATH_VALUE="${KERNEL_SOURCE_DIRECTORY_VALUE}/common/arch/arm64/configs/gki_defconfig"
+           echo "GKI_DEFCONFIG_PATH_ENV=${GKI_DEFCONFIG_FILE_PATH_VALUE}" >> $GITHUB_ENV
+           echo "gki_defconfig_path_output=${GKI_DEFCONFIG_FILE_PATH_VALUE}" >> $GITHUB_OUTPUT
++
+       - name: 调整KPM设置
+         id: kpm_settings
+         run: |
+           set -euo pipefail
++          # 6.6 / 6.12 走 Bazel(kleaf) 构建路径, KPM 后处理补丁不适用 => 强制关闭
+           EFFECTIVE_KPM_VALUE=""
+-          if [[ "${{ env.SELECTED_ANDROID_VERSION }}" == "android15" && "${{ env.SELECTED_KERNEL_VERSION }}" == "6.6" ]]; then
+-            EFFECTIVE_KPM_VALUE="false"
+-          else
+-            EFFECTIVE_KPM_VALUE="${{ github.event.inputs.use_kpm }}"
+-          fi
++          case "${{ env.SELECTED_KERNEL_VERSION }}" in
++            6.6|6.12) EFFECTIVE_KPM_VALUE="false" ;;
++            *)        EFFECTIVE_KPM_VALUE="${{ github.event.inputs.use_kpm }}" ;;
++          esac
+           echo "EFFECTIVE_USE_KPM=${EFFECTIVE_KPM_VALUE}" >> $GITHUB_ENV
+           echo "effective_kpm_value=${EFFECTIVE_KPM_VALUE}" >> $GITHUB_OUTPUT
++
+       - name: 优化构建空间
+         uses: easimon/maximize-build-space@master
+         with:
+@@ -168,10 +194,12 @@ jobs:
+           remove-android: "true"
+           remove-haskell: "true"
+           remove-codeql: "true"
++
+       - name: 安装构建依赖
+         run: |
+           sudo apt-get update -qq
+           sudo apt-get install -yq --no-install-recommends ccache python3 git curl time libssl-dev flex
++
+       - name: 配置ccache
+         run: |
+           set -euo pipefail
+@@ -184,6 +212,7 @@ jobs:
+           fi
+           echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+           ccache -s
++
+       - name: 还原ccache缓存
+         uses: actions/cache@v4
+         with:
+@@ -192,6 +221,7 @@ jobs:
+           restore-keys: |
+             ${{ runner.os }}-ccache-v2-${{ github.event.inputs.kernel_to_build }}-
+             ${{ runner.os }}-ccache-v2-
++
+       - name: 缓存预编译工具链
+         id: cache-toolchain
+         uses: actions/cache@v4
+@@ -200,6 +230,7 @@ jobs:
+             kernel-build-tools
+             mkbootimg
+           key: toolchain-${{ runner.os }}-v3
++
+       - name: 下载预编译工具链
+         if: steps.cache-toolchain.outputs.cache-hit != 'true'
+         run: |
+@@ -209,12 +240,14 @@ jobs:
+           MKBOOTIMG_BRANCH=main
+           git clone "$AOSP_MIRROR/kernel/prebuilts/build-tools" -b "$BUILD_TOOLS_BRANCH" --depth 1 kernel-build-tools
+           git clone "$AOSP_MIRROR/platform/system/tools/mkbootimg" -b "$MKBOOTIMG_BRANCH" --depth 1 mkbootimg
++
+       - name: 设置工具链环境变量
+         run: |
+           set -euo pipefail
+           echo "AVBTOOL=$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/bin/avbtool" >> $GITHUB_ENV
+           echo "MKBOOTIMG=$GITHUB_WORKSPACE/mkbootimg/mkbootimg.py" >> $GITHUB_ENV
+           echo "UNPACK_BOOTIMG=$GITHUB_WORKSPACE/mkbootimg/unpack_bootimg.py" >> $GITHUB_ENV
++
+       - name: 设置签名密钥
+         env:
+           BOOT_SIGN_KEY: ${{ secrets.BOOT_SIGN_KEY }}
+@@ -229,6 +262,7 @@ jobs:
+             echo "$BOOT_SIGN_KEY" > "$KEY_DIR/production_key.pem"
+             echo "BOOT_SIGN_KEY_PATH=$KEY_DIR/production_key.pem" >> $GITHUB_ENV
+           fi
++
+       - name: 安装repo工具
+         run: |
+           set -euo pipefail
+@@ -236,19 +270,25 @@ jobs:
+           curl -sS https://storage.googleapis.com/git-repo-downloads/repo > ./git-repo/repo
+           chmod a+rx ./git-repo/repo
+           echo "REPO=$GITHUB_WORKSPACE/./git-repo/repo" >> $GITHUB_ENV
++
+       - name: 克隆依赖仓库
+         run: |
+           set -euo pipefail
+           ANYKERNEL_BRANCH="gki-2.0"
+           SUSFS_BRANCH="gki-${{ env.SELECTED_ANDROID_VERSION }}-${{ env.SELECTED_KERNEL_VERSION }}"
++          echo "SUSFS_BRANCH=${SUSFS_BRANCH}" >> $GITHUB_ENV
+           git clone https://github.com/WildPlusKernel/AnyKernel3.git -b "$ANYKERNEL_BRANCH" AnyKernel3
+-          git clone https://github.com/ShirkNeko/susfs4ksu.git -b "$SUSFS_BRANCH" susfs4ksu
+-          git clone https://github.com/WildPlusKernel/kernel_patches.git kernel_patches
++          # SUSFS 上游在 gitlab, 6.12(android16) 分支只有上游才有; GitHub 镜像作为备用源
++          if ! git clone --depth 1 -b "$SUSFS_BRANCH" https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu; then
++            rm -rf susfs4ksu
++            git clone --depth 1 -b "$SUSFS_BRANCH" https://github.com/ShirkNeko/susfs4ksu.git susfs4ksu
++          fi
+           git clone https://github.com/ShirkNeko/SukiSU_patch.git SukiSU_patch
++
+       - name: 同步内核源码
+         uses: nick-fields/retry@v3
+         with:
+-          timeout_minutes: 20
++          timeout_minutes: 25
+           max_attempts: 3
+           command: |
+             set -euo pipefail
+@@ -263,6 +303,7 @@ jobs:
+             else
+               _MANIFEST_BRANCH="${_MANIFEST_BRANCH_BASE}"
+             fi
++            echo "Using manifest branch: ${_MANIFEST_BRANCH}"
+             ${{ env.REPO }} init --depth=1 -u https://android.googlesource.com/kernel/manifest -b $_MANIFEST_BRANCH --repo-rev=v2.16
+             DEFAULT_MANIFEST_PATH=".repo/manifests/default.xml"
+             if [ ! -f "$DEFAULT_MANIFEST_PATH" ] && [ -f .repo/manifest.xml ]; then
+@@ -277,6 +318,7 @@ jobs:
+             fi
+             REMOTE_COMMON_BRANCH_STATUS=$(git ls-remote https://android.googlesource.com/kernel/common "$COMMON_PROJECT_REVISION_IN_MANIFEST")
+             if echo "$REMOTE_COMMON_BRANCH_STATUS" | grep -q "refs/heads/deprecated/$COMMON_PROJECT_REVISION_IN_MANIFEST"; then
++              echo "::notice::内核分支已归档, 自动切换到 deprecated/ 前缀"
+               sed -i "/project path=\"common\"/s|revision=\"$COMMON_PROJECT_REVISION_IN_MANIFEST\"|revision=\"deprecated/$COMMON_PROJECT_REVISION_IN_MANIFEST\"|" "$DEFAULT_MANIFEST_PATH" || \
+               sed -i "/project path=\"kernel\/common\"/s|revision=\"$COMMON_PROJECT_REVISION_IN_MANIFEST\"|revision=\"deprecated/$COMMON_PROJECT_REVISION_IN_MANIFEST\"|" "$DEFAULT_MANIFEST_PATH"
+             fi
+@@ -287,19 +329,25 @@ jobs:
+         run: |
+           set -euo pipefail
+           echo "Adding SukiSU..."
+-          
+-          SUKI_TECHNICAL_BRANCH=""
+-          if [[ "${{ github.event.inputs.kernelsu_branch }}" == "Dev" ]]; then
+-            # 仿照参考工作流，为SukiSU的Dev选择susfs-test分支
+-            SUKI_TECHNICAL_BRANCH="susfs-test"
+-          else
+-            # Stable分支使用susfs-main
+-            SUKI_TECHNICAL_BRANCH="susfs-main"
++          # SukiSU 已删除 susfs-test / susfs-main 分支; 带 SUSFS 支持的是 builtin 分支
++          SUKI_BRANCH="${{ github.event.inputs.kernelsu_branch }}"
++          echo "Using SukiSU branch: ${SUKI_BRANCH}"
++          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash "$SUKI_BRANCH"
++
++          if [ ! -d "KernelSU" ]; then
++            echo "::error::SukiSU 源码目录不存在, 集成失败"
++            exit 1
++          fi
++
++          if [ "$SUKI_BRANCH" = "builtin" ] && ! grep -q "config KSU_SUSFS" KernelSU/kernel/Kconfig; then
++            echo "::error::当前 SukiSU 分支不含 SUSFS 配置项, 请改用 builtin 分支"
++            exit 1
++          fi
++
++          if ! grep -q "drivers/kernelsu/Kconfig" common/drivers/Kconfig; then
++            echo "::error::drivers/Kconfig 未注入 kernelsu, SukiSU setup 未生效"
++            exit 1
+           fi
+-          
+-          SUKI_BRANCH_ARG="-s ${SUKI_TECHNICAL_BRANCH}"
+-          echo "Using SukiSU setup argument: $SUKI_BRANCH_ARG"
+-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash $SUKI_BRANCH_ARG
+ 
+       - name: 获取SukiSU实际版本号
+         id: get_sukisu_version
+@@ -308,10 +356,8 @@ jobs:
+         run: |
+           set -euo pipefail
+           suki_version_actual="获取失败"
+-          # SukiSU setup.sh 会创建一个名为 KernelSU 的目录
+           if [ -d "KernelSU" ]; then
+             cd KernelSU
+-            # 优先使用git describe获取最可靠的版本信息
+             suki_version_actual=$(git describe --tags --long --dirty 2>/dev/null || git rev-parse --short HEAD)
+             cd ..
+           else
+@@ -319,68 +365,147 @@ jobs:
+           fi
+           echo "Detected SukiSU version: ${suki_version_actual}"
+           echo "sukisu_version_string=${suki_version_actual}" >> $GITHUB_OUTPUT
+-          
++
+       - name: 应用SUSFS补丁
+         working-directory: ${{ env.KERNEL_SRC_ROOT }}
+         shell: bash
+         run: |
+           set -euo pipefail
+-          echo "Applying SUSFS patches..."
+-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.SELECTED_ANDROID_VERSION }}-${{ env.SELECTED_KERNEL_VERSION }}.patch ./common/
++          SUSFS_PATCH_NAME="50_add_susfs_in_gki-${{ env.SELECTED_ANDROID_VERSION }}-${{ env.SELECTED_KERNEL_VERSION }}.patch"
++          SUSFS_PATCH_SRC="../susfs4ksu/kernel_patches/${SUSFS_PATCH_NAME}"
++          if [ ! -f "$SUSFS_PATCH_SRC" ]; then
++            echo "::error::找不到 SUSFS 补丁 ${SUSFS_PATCH_NAME} (分支 ${SUSFS_BRANCH} 不存在该内核版本的补丁)"
++            ls ../susfs4ksu/kernel_patches/ || true
++            exit 1
++          fi
++          cp "$SUSFS_PATCH_SRC" "./common/${SUSFS_PATCH_NAME}"
+           cp -r ../susfs4ksu/kernel_patches/fs/* ./common/fs/
+           cp -r ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
++
+           cd ./common
+-          patch -p1 --fuzz=3 < 50_add_susfs_in_gki-${{ env.SELECTED_ANDROID_VERSION }}-${{ env.SELECTED_KERNEL_VERSION }}.patch || { echo "::error::SUSFS common patch failed."; exit 1; }
+-          cd - >/dev/null
++          echo "Applying ${SUSFS_PATCH_NAME} ..."
++
++          # 先用 dry-run 决定模糊级别, 再一次性落盘:
++          # 补丁与源码完全对得上(0 级)才用严格模式; 否则退回 3 级并给出警告,
++          # 避免"看似打上了、其实插错位置"导致 -Werror 编译失败
++          SUSFS_FUZZ=""
++          if patch -p1 -F 0 --batch --forward --dry-run -i "${SUSFS_PATCH_NAME}" > /tmp/susfs_patch_strict.log 2>&1; then
++            SUSFS_FUZZ="0"
++          elif patch -p1 -F 3 --batch --forward --dry-run -i "${SUSFS_PATCH_NAME}" > /tmp/susfs_patch_fuzz.log 2>&1; then
++            SUSFS_FUZZ="3"
++            echo "::warning::SUSFS 补丁只能模糊匹配(上下文偏移), 已继续构建; 建议改用更新的内核子版本"
++          else
++            cat /tmp/susfs_patch_strict.log
++            cat /tmp/susfs_patch_fuzz.log 2>/dev/null || true
++            echo "::error::SUSFS 补丁与该内核源码不匹配, 无法应用。请改选更新的内核子版本(6.6 建议 2025-09 之后, 6.12 建议 2025-09 之后)"
++            exit 1
++          fi
++
++          patch -p1 -F "${SUSFS_FUZZ}" --batch --forward --no-backup-if-mismatch -i "${SUSFS_PATCH_NAME}" > /tmp/susfs_patch.log 2>&1 || {
++            cat /tmp/susfs_patch.log
++            echo "::error::SUSFS 补丁应用失败"
++            exit 1
++          }
++          cat /tmp/susfs_patch.log
++          if [ -n "$(find . -name '*.rej' -print -quit)" ]; then
++            echo "::error::SUSFS 补丁存在未应用的 hunk:"
++            find . -name "*.rej" -print -exec cat {} \;
++            exit 1
++          fi
++          echo "[OK] SUSFS 补丁应用完成 (fuzz=${SUSFS_FUZZ})"
++          cd - > /dev/null
++
+       - name: 应用内核补丁
+         shell: bash
+         run: |
+           set -euo pipefail
+           COMMON_DIR_PATH="${{ env.KERNEL_SRC_ROOT }}/common"
+-          apply_hooks_patch() {
+-            cd "$COMMON_DIR_PATH"||exit 1
+-            HOOKS_PATCH_FILE="${GITHUB_WORKSPACE}/SukiSU_patch/hooks/syscall_hooks.patch"
+-            if [ -f "$HOOKS_PATCH_FILE" ]; then
+-              cp "$HOOKS_PATCH_FILE" ./syscall_hooks.patch
+-              patch -p1 -F 3 < syscall_hooks.patch || { echo "::error::SukiSU hooks patch failed."; exit 1; }
++          KV="${{ env.SELECTED_KERNEL_VERSION }}"
++
++          # 可选补丁: 只有 0 级模糊匹配(dry-run)通过才真正落盘, 不匹配就整条跳过,
++          # 避免模糊匹配把代码插到错误位置, 生成"能打上但编不过"的内核源码
++          try_patch() {
++            local wd="$1"; local pf="$2"; local label="$3"
++            if [ ! -f "$pf" ]; then
++              echo "::notice::${label}: 补丁文件不存在, 跳过"
++              return 0
+             fi
+-          }
+-          apply_zram_compression_patches() {
+-            if [[ "${{ github.event.inputs.use_zram }}" == "true" ]]; then
+-              cd "$COMMON_DIR_PATH"||exit 1
+-              ZRAM_PATCH_BASE="${GITHUB_WORKSPACE}/SukiSU_patch/other/zram"
+-              local src_inc="${ZRAM_PATCH_BASE}/lz4k/include/linux"; local dst_inc="./include/linux"
+-              if [ -d "$src_inc" ]; then mkdir -p "$dst_inc"; if [ -n "$(ls -A "$src_inc" 2>/dev/null)" ]; then cp -r "${src_inc}/." "$dst_inc/" || exit 1; fi; fi
+-              local src_lib="${ZRAM_PATCH_BASE}/lz4k/lib"; local dst_lib="./lib"
+-              if [ -d "$src_lib" ]; then mkdir -p "$dst_lib"; if [ -n "$(ls -A "$src_lib" 2>/dev/null)" ]; then cp -r "${src_lib}/." "$dst_lib/" || exit 1; fi; fi
+-              local src_crypto="${ZRAM_PATCH_BASE}/lz4k/crypto"; local dst_crypto="./crypto"
+-              if [ -d "$src_crypto" ]; then mkdir -p "$dst_crypto"; if [ -n "$(ls -A "$src_crypto" 2>/dev/null)" ]; then cp -r "${src_crypto}/." "$dst_crypto/" || exit 1; fi
+-              else exit 1; fi
+-              if [ -d "${ZRAM_PATCH_BASE}/lz4k_oplus" ]; then mkdir -p ./lib; cp -r "${ZRAM_PATCH_BASE}/lz4k_oplus" ./lib/ || exit 1; fi
+-              LZ4KD_PATCH="${ZRAM_PATCH_BASE}/zram_patch/${{env.SELECTED_KERNEL_VERSION}}/lz4kd.patch"
+-              if [ -f "$LZ4KD_PATCH" ]; then cp "$LZ4KD_PATCH" ./lz4kd.patch; patch -p1 -F 3 < lz4kd.patch || exit 1; fi
+-              LZ4KOPLUS_PATCH="${ZRAM_PATCH_BASE}/zram_patch/${{env.SELECTED_KERNEL_VERSION}}/lz4k_oplus.patch"
+-              if [ -f "$LZ4KOPLUS_PATCH" ]; then cp "$LZ4KOPLUS_PATCH" ./lz4k_oplus.patch; patch -p1 -F 3 < lz4k_oplus.patch || exit 1; fi
++            if patch -d "$wd" -p1 -F 0 --batch --forward --dry-run -i "$pf" > /tmp/try_patch.log 2>&1; then
++              patch -d "$wd" -p1 -F 0 --batch --forward --no-backup-if-mismatch -i "$pf" >> /tmp/try_patch.log 2>&1
++              echo "[OK] ${label}"
++            else
++              echo "::warning::${label}: 与当前内核源码不匹配, 已跳过(不影响编译)"
+             fi
+           }
+-          apply_hide_stuff_patch() {
+-            cd "$COMMON_DIR_PATH"||exit 1
+-            HIDE_PATCH_FILE="${GITHUB_WORKSPACE}/SukiSU_patch/69_hide_stuff.patch"
+-            if [ -f "$HIDE_PATCH_FILE" ]; then
+-              cp "$HIDE_PATCH_FILE" ./hide_stuff.patch
+-              patch -p1 -F 3 < hide_stuff.patch || { echo "::error::Hide stuff patch failed."; exit 1; }
++
++          # 1) syscall hooks (仅 CONFIG_KSU_MANUAL_HOOK 下生效, 对 builtin 分支为空操作)
++          cp "${GITHUB_WORKSPACE}/SukiSU_patch/hooks/syscall_hooks.patch" "${COMMON_DIR_PATH}/syscall_hooks.patch" 2>/dev/null || true
++          try_patch "$COMMON_DIR_PATH" "${COMMON_DIR_PATH}/syscall_hooks.patch" "SukiSU syscall hooks"
++
++          # 2) ZRAM 额外算法 (lz4kd / lz4k_oplus) —— 仅当该内核版本存在配套补丁时启用
++          #    这些补丁长期没有跟随上游更新, 允许 3 级模糊匹配, 但必须保证没有 .rej 残留
++          ZRAM_PATCH_BASE="${GITHUB_WORKSPACE}/SukiSU_patch/other/zram"
++          ZRAM_KD_OK="false"
++          ZRAM_OPLUS_OK="false"
++
++          revert_files() {
++            local wd="$1"; shift
++            ( cd "$wd" && git checkout -- "$@" 2>/dev/null || true )
++            ( cd "$wd" && find . -name "*.rej" -delete 2>/dev/null || true )
++          }
++
++          apply_zram_patch() {
++            local name="$1"; local patch_file="$2"; shift 2
++            local files="$*"
++            if [ ! -f "$patch_file" ]; then
++              return 0
++            fi
++            if ! patch -d "$COMMON_DIR_PATH" -p1 -F 3 --batch --forward --dry-run -i "$patch_file" > "/tmp/zram_${name}.log" 2>&1; then
++              echo "::warning::zram ${name} 补丁上下文不匹配, 跳过该压缩算法(不影响编译)"
++              return 0
+             fi
++            if patch -d "$COMMON_DIR_PATH" -p1 -F 3 --batch --forward --no-backup-if-mismatch -i "$patch_file" >> "/tmp/zram_${name}.log" 2>&1 \
++               && [ -z "$(find "$COMMON_DIR_PATH" -name '*.rej' -print -quit)" ]; then
++              echo "[OK] zram ${name}"
++              return 0
++            fi
++            cat "/tmp/zram_${name}.log"
++            echo "::warning::zram ${name} 应用不完整, 回滚相关文件并跳过"
++            revert_files "$COMMON_DIR_PATH" $files
++            return 0
+           }
+-          apply_hooks_patch & PID_HOOKS=$!
+-          apply_zram_compression_patches & PID_ZRAM=$!
+-          apply_hide_stuff_patch & PID_HIDE=$!
+-          FAIL=0
+-          wait $PID_HOOKS || FAIL=1
+-          wait $PID_ZRAM || FAIL=1
+-          wait $PID_HIDE || FAIL=1
+-          if [ "$FAIL" -eq 1 ]; then
+-            exit 1
++
++          if [[ "${{ github.event.inputs.use_zram }}" == "true" && -d "${ZRAM_PATCH_BASE}/zram_patch/${KV}" ]]; then
++            for d in include/linux lib crypto; do
++              if [ -d "${ZRAM_PATCH_BASE}/lz4k/${d}" ] && [ -n "$(ls -A "${ZRAM_PATCH_BASE}/lz4k/${d}" 2>/dev/null)" ]; then
++                mkdir -p "${COMMON_DIR_PATH}/${d}"
++                cp -r "${ZRAM_PATCH_BASE}/lz4k/${d}/." "${COMMON_DIR_PATH}/${d}/"
++              fi
++            done
++            if [ -d "${ZRAM_PATCH_BASE}/lz4k_oplus" ]; then
++              mkdir -p "${COMMON_DIR_PATH}/lib"
++              cp -r "${ZRAM_PATCH_BASE}/lz4k_oplus" "${COMMON_DIR_PATH}/lib/"
++            fi
++
++            apply_zram_patch "lz4kd" "${ZRAM_PATCH_BASE}/zram_patch/${KV}/lz4kd.patch" \
++              lib/Kconfig lib/Makefile crypto/Kconfig crypto/Makefile drivers/block/zram/Kconfig drivers/block/zram/zcomp.c kernel/module/main.c || true
++            if [ -f "${ZRAM_PATCH_BASE}/zram_patch/${KV}/lz4kd.patch" ] && [ -z "$(find "$COMMON_DIR_PATH" -name 'lz4kd.rej' -print -quit)" ] \
++               && grep -q "LZ4KD" "$COMMON_DIR_PATH/crypto/Kconfig" 2>/dev/null; then
++              ZRAM_KD_OK="true"
++            fi
++
++            apply_zram_patch "lz4k_oplus" "${ZRAM_PATCH_BASE}/zram_patch/${KV}/lz4k_oplus.patch" \
++              drivers/block/zram/Kconfig drivers/block/zram/zcomp.c || true
++            if [ -f "${ZRAM_PATCH_BASE}/zram_patch/${KV}/lz4k_oplus.patch" ] \
++               && grep -q "LZ4K_OPLUS" "$COMMON_DIR_PATH/drivers/block/zram/Kconfig" 2>/dev/null; then
++              ZRAM_OPLUS_OK="true"
++            fi
++          elif [[ "${{ github.event.inputs.use_zram }}" == "true" ]]; then
++            echo "::notice::当前内核版本 ${KV} 没有 lz4kd 补丁, 仅启用内核自带 ZRAM 后端"
+           fi
++          echo "ZRAM_KD_ENABLED=${ZRAM_KD_OK}" >> $GITHUB_ENV
++          echo "ZRAM_OPLUS_ENABLED=${ZRAM_OPLUS_OK}" >> $GITHUB_ENV
++
+       - name: 配置ZRAM算法
+         if: ${{ github.event.inputs.use_zram == 'true' }}
+         run: |
+@@ -393,25 +518,37 @@ jobs:
+             sed -i "/^# ${k} is not set/d" "$CONFIG_FILE_PATH"
+           }
+           update_cfg "CONFIG_ZSMALLOC" "y"; update_cfg "CONFIG_ZRAM" "y"
+-          if [ "${{ env.SELECTED_KERNEL_VERSION }}" = "5.10" ]; then update_cfg "CONFIG_MODULE_SIG" "n"; update_cfg "CONFIG_CRYPTO_LZO" "y"; update_cfg "CONFIG_ZRAM_DEF_COMP_LZ4KD" "y"; fi
+-          if [ "${{ env.SELECTED_ANDROID_VERSION }}" = "android14" ] || [ "${{ env.SELECTED_ANDROID_VERSION }}" = "android15" ]; then
+-            MP="${{ env.KERNEL_SRC_ROOT }}/common/modules.bzl"; if [ -f "$MP" ]; then sed -i 's/"drivers\/block\/zram\/zram\.ko",//g; s/"mm\/zsmalloc\.ko",//g' "$MP"; fi
+-            update_cfg "CONFIG_MODULE_SIG_FORCE" "n"
+-          elif [ "${{ env.SELECTED_KERNEL_VERSION }}" = "5.10" ] || [ "${{ env.SELECTED_KERNEL_VERSION }}" = "5.15" ]; then
+-            GMF="${{ env.KERNEL_SRC_ROOT }}/common/android/gki_aarch64_modules"; if [ -f "$GMF" ]; then echo -n > "$GMF"; fi
++          if [ "${{ env.SELECTED_KERNEL_VERSION }}" = "5.10" ]; then
++            update_cfg "CONFIG_MODULE_SIG" "n"; update_cfg "CONFIG_CRYPTO_LZO" "y"; update_cfg "CONFIG_ZRAM_DEF_COMP_LZ4KD" "y"
+           fi
+-          if grep -q "^CONFIG_ZSMALLOC=y$" "$CONFIG_FILE_PATH" && grep -q "^CONFIG_ZRAM=y$" "$CONFIG_FILE_PATH"; then
++          case "${{ env.SELECTED_ANDROID_VERSION }}" in
++            android14|android15|android16)
++              MP="${{ env.KERNEL_SRC_ROOT }}/common/modules.bzl"
++              if [ -f "$MP" ]; then sed -i 's/"drivers\/block\/zram\/zram\.ko",//g; s/"mm\/zsmalloc\.ko",//g' "$MP"; fi
++              update_cfg "CONFIG_MODULE_SIG_FORCE" "n"
++              ;;
++            *)
++              if [ "${{ env.SELECTED_KERNEL_VERSION }}" = "5.10" ] || [ "${{ env.SELECTED_KERNEL_VERSION }}" = "5.15" ]; then
++                GMF="${{ env.KERNEL_SRC_ROOT }}/common/android/gki_aarch64_modules"; if [ -f "$GMF" ]; then echo -n > "$GMF"; fi
++              fi
++              ;;
++          esac
++          if [ "${ZRAM_KD_ENABLED:-false}" = "true" ]; then
+             update_cfg "CONFIG_CRYPTO_LZ4HC" "y"; update_cfg "CONFIG_CRYPTO_LZ4K" "y"
+-            update_cfg "CONFIG_CRYPTO_LZ4KD" "y"; update_cfg "CONFIG_CRYPTO_842" "y"; update_cfg "CONFIG_CRYPTO_LZ4K_OPLUS" "y"
++            update_cfg "CONFIG_CRYPTO_LZ4KD" "y"; update_cfg "CONFIG_CRYPTO_842" "y"
++          fi
++          if [ "${ZRAM_OPLUS_ENABLED:-false}" = "true" ]; then
++            update_cfg "CONFIG_CRYPTO_LZ4K_OPLUS" "y"
+           fi
+           sort -u "$CONFIG_FILE_PATH" -o "$CONFIG_FILE_PATH"
++
+       - name: 配置SUSFS功能
+         run: |
+           set -euo pipefail
+           GKI_PATH="${{ env.GKI_DEFCONFIG_PATH_ENV }}"; if [ ! -f "$GKI_PATH" ]; then exit 1; fi
+           upd_cfg() { local k="$1"; local v="$2"; sed -i -e "/^${k}=/d" -e "/^# ${k} is not set/d" "$GKI_PATH"; echo "${k}=${v}" >> "$GKI_PATH"; }
+-          cfgs_y=( "CONFIG_KSU" "CONFIG_KSU_MANUAL_HOOK" "CONFIG_TMPFS_XATTR" "CONFIG_TMPFS_POSIX_ACL" "CONFIG_IP_NF_TARGET_TTL" "CONFIG_IP6_NF_TARGET_HL" "CONFIG_IP6_NF_MATCH_HL" "CONFIG_TCP_CONG_ADVANCED" "CONFIG_TCP_CONG_BBR" "CONFIG_NET_SCH_FQ" "CONFIG_KSU_SUSFS" "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT" "CONFIG_KSU_SUSFS_SUS_PATH" "CONFIG_KSU_SUSFS_SUS_MOUNT" "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT" "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT" "CONFIG_KSU_SUSFS_SUS_KSTAT" "CONFIG_KSU_SUSFS_TRY_UMOUNT" "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT" "CONFIG_KSU_SUSFS_SPOOF_UNAME" "CONFIG_KSU_SUSFS_ENABLE_LOG" "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS" "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG" "CONFIG_KSU_SUSFS_OPEN_REDIRECT" )
+-          cfgs_n=( "CONFIG_KSU_SUSFS_SUS_SU" "CONFIG_KSU_SUSFS_SUS_OVERLAYFS" "CONFIG_TCP_CONG_BIC" "CONFIG_TCP_CONG_WESTWOOD" "CONFIG_TCP_CONG_HTCP" )
++          cfgs_y=( "CONFIG_KSU" "CONFIG_TMPFS_XATTR" "CONFIG_TMPFS_POSIX_ACL" "CONFIG_IP_NF_TARGET_TTL" "CONFIG_IP6_NF_TARGET_HL" "CONFIG_IP6_NF_MATCH_HL" "CONFIG_TCP_CONG_ADVANCED" "CONFIG_TCP_CONG_BBR" "CONFIG_NET_SCH_FQ" "CONFIG_KSU_SUSFS" "CONFIG_KSU_SUSFS_SUS_PATH" "CONFIG_KSU_SUSFS_SUS_MOUNT" "CONFIG_KSU_SUSFS_SUS_KSTAT" "CONFIG_KSU_SUSFS_SUS_MAP" "CONFIG_KSU_SUSFS_SPOOF_UNAME" "CONFIG_KSU_SUSFS_ENABLE_LOG" "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS" "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG" "CONFIG_KSU_SUSFS_OPEN_REDIRECT" )
++          cfgs_n=( "CONFIG_TCP_CONG_BIC" "CONFIG_TCP_CONG_WESTWOOD" "CONFIG_TCP_CONG_HTCP" )
+           for ck in "${cfgs_y[@]}"; do upd_cfg "$ck" "y"; done
+           for cn in "${cfgs_n[@]}"; do upd_cfg "$cn" "n"; done
+           if [[ "${{ env.EFFECTIVE_USE_KPM }}" == "true" ]]; then upd_cfg "CONFIG_KPM" "y"; else upd_cfg "CONFIG_KPM" "n"; fi
+@@ -419,6 +556,7 @@ jobs:
+           for fp in "${{ env.KERNEL_SRC_ROOT }}/common/build.config.gki" "${{ env.KERNEL_SRC_ROOT }}/common/build.config.gki.aarch64" "${{ env.KERNEL_SRC_ROOT }}/common/build.config"; do
+             if [ -f "$fp" ]; then sed -i 's/check_defconfig//g' "$fp"; fi
+           done
++
+       - name: 生成版本后缀和日期
+         id: generate_suffixes
+         env:
+@@ -443,7 +581,7 @@ jobs:
+             elif [ "$SELECTED_AV_ENV" == "android14" ] && [ "$SELECTED_KV_ENV" == "6.1" ]; then kernel_fixed_part_for_localversion="-android14-11"
+             elif [ "$SELECTED_AV_ENV" == "android15" ] && [ "$SELECTED_KV_ENV" == "6.6" ]; then kernel_fixed_part_for_localversion="-android15-8"
+             else kernel_fixed_part_for_localversion="-${SELECTED_AV_ENV}-${SELECTED_KV_ENV//./_}-custom"; fi
+-            
++
+             random_hex_11=$(head /dev/urandom | LC_ALL=C tr -dc 'a-f0-9' | head -c 11 || echo "randhex")
+             random_digits_8=$(head /dev/urandom | LC_ALL=C tr -dc '0-9' | head -c 8 || echo "randdig")
+             final_kernel_local_version="${kernel_fixed_part_for_localversion}-gd${random_hex_11}-ab${random_digits_8}"
+@@ -451,14 +589,14 @@ jobs:
+           fi
+           echo "FINAL_KERNEL_LOCAL_VERSION=${final_kernel_local_version}" >> "$GITHUB_ENV"
+           echo "final_kernel_local_version_for_release_body=${final_kernel_local_version}" >> $GITHUB_OUTPUT
++
+       - name: 配置内核版本参数
+         working-directory: ${{ env.KERNEL_SRC_ROOT }}
+         run: |
+           set -euo pipefail
+           GKI_DEFCONFIG="${{ env.GKI_DEFCONFIG_PATH_ENV }}"
+           SLS="./common/scripts/setlocalversion"
+-          
+-          # 清理defconfig中的版本设置，防止内核自身逻辑和我们的强制设定冲突
++
+           if [ -f "$GKI_DEFCONFIG" ]; then
+             sed -i '/^CONFIG_LOCALVERSION=/d' "$GKI_DEFCONFIG"
+             echo 'CONFIG_LOCALVERSION=""' >> "$GKI_DEFCONFIG"
+@@ -467,24 +605,21 @@ jobs:
+             sort -u "$GKI_DEFCONFIG" -o "$GKI_DEFCONFIG"
+           fi
+ 
+-          # 强制覆盖setlocalversion脚本，让它只输出我们生成的版本号
+           if [ -f "$SLS" ]; then
+             if [[ -n "${{ env.FINAL_KERNEL_LOCAL_VERSION }}" ]]; then
+-              echo '#!/bin/sh' > "$SLS"
+-              echo 'echo "${{ env.FINAL_KERNEL_LOCAL_VERSION }}"' >> "$SLS"
++              printf '#!/bin/sh\necho "%s"\n' "${{ env.FINAL_KERNEL_LOCAL_VERSION }}" > "$SLS"
+               chmod +x "$SLS"
+             else
+-              # 如果没有生成版本号（理论上不应发生），则只清理-dirty标记以防万一
+               sed -i 's/-dirty//g' "$SLS"
+             fi
+           fi
+ 
+-          # 清理Bazel构建产生的-dirty标记
+           if [ ! -f "./build/build.sh" ]; then
+             if [ -f "./common/BUILD.bazel" ]; then sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' "./common/BUILD.bazel"; fi
+-            find ./common/android/ -name "abi_gki_protected_exports_*" -delete
++            if [ -d "./common/android" ]; then find ./common/android/ -name "abi_gki_protected_exports_*" -delete 2>/dev/null || true; fi
+             if [ -f "./build/kernel/kleaf/impl/stamp.bzl" ]; then sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" "./build/kernel/kleaf/impl/stamp.bzl"; fi
+           fi
++
+       - name: 校验关键内核配置
+         run: |
+           set -euo pipefail
+@@ -497,17 +632,25 @@ jobs:
+               else echo "::warning::${k}!=${ev}"; fi
+             else echo "${k}=${ev} OK."; fi
+           }
+-          check_cfg "CONFIG_KSU" "y" "true"; check_cfg "CONFIG_KSU_SUSFS" "y" "false"; check_cfg "CONFIG_MODVERSIONS" "y" "false"
++          check_cfg "CONFIG_KSU" "y" "true"
++          if [ "${{ github.event.inputs.kernelsu_branch }}" = "builtin" ]; then
++            check_cfg "CONFIG_KSU_SUSFS" "y" "true"
++          else
++            check_cfg "CONFIG_KSU_SUSFS" "y" "false"
++          fi
++          check_cfg "CONFIG_MODVERSIONS" "y" "false"
+           if [[ "${{ github.event.inputs.use_zram }}" == "true" ]]; then
+-            check_cfg "CONFIG_ZRAM" "y" "true"; check_cfg "CONFIG_CRYPTO_LZ4K" "y" "true"
++            check_cfg "CONFIG_ZRAM" "y" "true"
++            if [ "${ZRAM_KD_ENABLED:-false}" = "true" ]; then check_cfg "CONFIG_CRYPTO_LZ4K" "y" "true"; fi
+           fi
+-          if [ "$CRIT_FAIL" -ne 0 ]; then cat "$GKI_CHECK"; exit 1; fi
++          if [ "$CRIT_FAIL" -ne 0 ]; then echo "--- gki_defconfig ---"; cat "$GKI_CHECK"; exit 1; fi
++
+       - name: 执行内核编译
+         uses: nick-fields/retry@v3
+         env:
+           BAZEL_PROFILE_PATH_IN_WORKSPACE: "${{ github.workspace }}/${{ env.BAZEL_PROFILE_FILENAME }}"
+         with:
+-          timeout_minutes: 75
++          timeout_minutes: 90
+           max_attempts: 2
+           retry_on: timeout
+           command: |
+@@ -536,8 +679,9 @@ jobs:
+                 echo "::warning::Bazel profile file was expected (Bazel build path taken) but not found at ${BAZEL_PROFILE_PATH_IN_WORKSPACE}."
+               fi
+             fi
++
+       - name: KPM修补 (Android 12/13)
+-        if: env.EFFECTIVE_USE_KPM == 'true' && (env.SELECTED_ANDROID_VERSION == 'android12' || env.SELECTED_ANDROID_VERSION == 'android13') && env.SELECTED_KERNEL_VERSION != '6.6'
++        if: env.EFFECTIVE_USE_KPM == 'true' && (env.SELECTED_ANDROID_VERSION == 'android12' || env.SELECTED_ANDROID_VERSION == 'android13')
+         run: |
+           set -euo pipefail
+           IMG_DIR="${{ env.KERNEL_SRC_ROOT }}/out/${{ env.SELECTED_ANDROID_VERSION }}-${{ env.SELECTED_KERNEL_VERSION }}/dist"
+@@ -548,8 +692,9 @@ jobs:
+             chmod +x pk; ./pk
+             if [ -f "oImage" ]; then mv Image Image.o; mv oImage Image; fi
+           fi
++
+       - name: KPM修补 (Android 14/15)
+-        if: env.EFFECTIVE_USE_KPM == 'true' && (env.SELECTED_ANDROID_VERSION == 'android14' || env.SELECTED_ANDROID_VERSION == 'android15') && env.SELECTED_KERNEL_VERSION != '6.6'
++        if: env.EFFECTIVE_USE_KPM == 'true' && (env.SELECTED_ANDROID_VERSION == 'android14' || env.SELECTED_ANDROID_VERSION == 'android15')
+         run: |
+           set -euo pipefail
+           IMG_DIR="${{ env.KERNEL_SRC_ROOT }}/bazel-bin/common/kernel_aarch64/"
+@@ -560,6 +705,7 @@ jobs:
+             chmod +x pk; ./pk
+             if [ -f "oImage" ]; then mv Image Image.o; mv oImage Image; fi
+           fi
++
+       - name: 复制内核映像到AnyKernel3
+         run: |
+           set -euo pipefail
+@@ -567,26 +713,36 @@ jobs:
+           LGC_IMG="${{ env.KERNEL_SRC_ROOT }}/out/${{ env.SELECTED_ANDROID_VERSION }}-${{ env.SELECTED_KERNEL_VERSION }}/dist/Image"
+           BZL_IMG1="${{ env.KERNEL_SRC_ROOT }}/bazel-bin/common/kernel_aarch64/Image"
+           BZL_IMG2="${{ env.KERNEL_SRC_ROOT }}/out/android-gki/dist/Image"
++          BZL_IMG3="${{ env.KERNEL_SRC_ROOT }}/bazel-bin/common/kernel_aarch64_dist/Image"
+           if [ -f "$LGC_IMG" ]; then IMG_SRC="$LGC_IMG"
+           elif [ -f "$BZL_IMG1" ]; then IMG_SRC="$BZL_IMG1"
+           elif [ -f "$BZL_IMG2" ]; then IMG_SRC="$BZL_IMG2"
++          elif [ -f "$BZL_IMG3" ]; then IMG_SRC="$BZL_IMG3"
+           else
+-            ls -R "${{ env.KERNEL_SRC_ROOT }}/out/" || true
+-            ls -R "${{ env.KERNEL_SRC_ROOT }}/bazel-bin/" || true
++            ls -R "${{ env.KERNEL_SRC_ROOT }}/out/" 2>/dev/null | head -50 || true
++            IMG_SRC=$(find "${{ env.KERNEL_SRC_ROOT }}/bazel-bin" -type f -name Image -size +1M 2>/dev/null | head -n 1)
++          fi
++          if [ -z "$IMG_SRC" ] || [ ! -f "$IMG_SRC" ]; then
++            echo "::error::未找到编译产物 Image"
+             exit 1
+           fi
++          echo "Using image: $IMG_SRC"
+           AK3_DIR="$GITHUB_WORKSPACE/AnyKernel3"
+           if [ ! -d "$AK3_DIR" ]; then exit 1; fi
+           cp "$IMG_SRC" "$AK3_DIR/Image"
++
+       - name: 验证内核镜像类型
+         run: |
+           set -euo pipefail
+           IMG_VALIDATE="$GITHUB_WORKSPACE/AnyKernel3/Image"
+           if [ ! -f "$IMG_VALIDATE" ]; then exit 1; fi
+           file_out=$(file "$IMG_VALIDATE")
++          echo "$file_out"
+           if ! (echo "$file_out" | grep -q "ARM64" && echo "$file_out" | grep -q "Linux kernel"); then
++            echo "::error::Image 不是合法的 ARM64 Linux 内核"
+             exit 1
+           fi
++
+       - name: 生成发布信息和文件名
+         id: generate_release_info
+         shell: bash
+@@ -617,12 +773,14 @@ jobs:
+           echo "release_tag_name=${_tag}" >> "$GITHUB_OUTPUT"
+           echo "release_title_name=${_tit}" >> "$GITHUB_OUTPUT"
+           echo "stable_release_tag_for_action=${_stable_group_tag}" >> "$GITHUB_OUTPUT"
++
+       - name: 上传内核刷机包 Artifact
+         uses: actions/upload-artifact@v4
+         with:
+           name: ${{ steps.generate_release_info.outputs.artifact_name_for_release }}
+           path: ${{ github.workspace }}/AnyKernel3
+           if-no-files-found: error
++
+       - name: 清理构建空间
+         if: always()
+         run: |
+@@ -630,6 +788,7 @@ jobs:
+           if [ -d "/home/runner/.cache/bazel_disk_cache" ]; then rm -rf /home/runner/.cache/bazel_disk_cache || echo "::warning::Bazel disk cache removal failed."; fi
+           if [ -d "$HOME/.cache/bazel" ]; then rm -rf "$HOME/.cache/bazel" || echo "::warning::Bazel repo cache removal failed."; fi
+           ccache -s
++
+       - name: 上传构建日志
+         if: always()
+         uses: actions/upload-artifact@v4
+@@ -652,11 +811,13 @@ jobs:
+         run: |
+           sudo apt-get update -qq
+           sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends zip
++
+       - name: 下载内核刷机包 Artifact
+         uses: actions/download-artifact@v4
+         with:
+           name: ${{ needs.build_kernel.outputs.artifact_name }}
+           path: downloaded_artifact/
++
+       - name: 打包内核刷机包
+         id: package_kernel
+         shell: bash
+@@ -669,6 +830,7 @@ jobs:
+           cd ..
+           if [ ! -f "${final_zip}" ]; then exit 1; fi
+           echo "packaged_zip=${final_zip}" >> $GITHUB_OUTPUT
++
+       - name: 创建或更新 Release
+         uses: ncipollo/release-action@v1
+         with:
+@@ -702,4 +864,4 @@ jobs:
+             * **构建 ID:** `${{ github.run_id }}`
+           token: ${{ secrets.GITHUB_TOKEN }}
+           allowUpdates: true
+-          replacesArtifacts: false
+\ No newline at end of file
++          replacesArtifacts: false
+diff --git a/.github/workflows/clear up.yml b/.github/workflows/clear up.yml
+index 2b1a313..87b315b 100644
+--- a/.github/workflows/clear up.yml	
++++ b/.github/workflows/clear up.yml	
+@@ -1,69 +1,69 @@
+-name: 清理旧的工作流运行记录
+-on:
+-  schedule:
+-    - cron: '0 */24 * * *'
+-  workflow_dispatch:
+-    inputs:
+-      days:
+-        description: '为每个工作流保留的运行记录天数'
+-        required: true
+-        default: '7'
+-        type: string
+-      minimum_runs:
+-        description: '为每个工作流保留的最小运行次数'
+-        required: true
+-        default: '6'
+-        type: string
+-      delete_workflow_pattern:
+-        description: '要清理的工作流名称或文件名 (如果未设置，则针对所有工作流)'
+-        required: false
+-        type: string
+-      delete_workflow_by_state_pattern:
+-        description: '按工作流状态筛选: active, deleted, disabled_fork, disabled_inactivity, disabled_manually'
+-        required: false
+-        default: "ALL"
+-        type: choice
+-        options:
+-          - "ALL"
+-          - active
+-          - deleted
+-          - disabled_inactivity
+-          - disabled_manually
+-      delete_run_by_conclusion_pattern:
+-        description: '按运行结论移除运行记录: action_required, cancelled, failure, skipped, success'
+-        required: false
+-        default: "ALL"
+-        type: choice
+-        options:
+-          - "ALL"
+-          - "Unsuccessful: action_required,cancelled,failure,skipped"
+-          - action_required
+-          - cancelled
+-          - failure
+-          - skipped
+-          - success
+-      dry_run:
+-        description: '记录模拟的更改，不执行实际删除操作'
+-        required: false
+-        default: false
+-        type: boolean
+-
+-jobs:
+-  cleanup_workflow_runs:
+-    name: 删除旧的工作流运行记录作业
+-    runs-on: ubuntu-latest
+-    permissions:
+-      actions: write
+-      contents: read
+-    steps:
+-      - name: 运行 Mattraks 删除工作流运行记录操作
+-        uses: Mattraks/delete-workflow-runs@v2
+-        with:
+-          token: ${{ github.token }}
+-          repository: ${{ github.repository }}
+-          retain_days: ${{ github.event_name == 'schedule' && 0 || github.event.inputs.days }}
+-          keep_minimum_runs: ${{ github.event_name == 'schedule' && 5 || github.event.inputs.minimum_runs }}
+-          delete_workflow_pattern: ${{ github.event_name == 'schedule' && '' || github.event.inputs.delete_workflow_pattern }}
+-          delete_workflow_by_state_pattern: ${{ github.event_name == 'schedule' && 'ALL' || github.event.inputs.delete_workflow_by_state_pattern }}
+-          delete_run_by_conclusion_pattern: ${{ github.event_name == 'schedule' && 'ALL' || (startsWith(github.event.inputs.delete_run_by_conclusion_pattern, 'Unsuccessful:') && 'action_required,cancelled,failure,skipped' || github.event.inputs.delete_run_by_conclusion_pattern) }}
++name: 清理旧的工作流运行记录
++on:
++  schedule:
++    - cron: '0 */24 * * *'
++  workflow_dispatch:
++    inputs:
++      days:
++        description: '为每个工作流保留的运行记录天数'
++        required: true
++        default: '7'
++        type: string
++      minimum_runs:
++        description: '为每个工作流保留的最小运行次数'
++        required: true
++        default: '6'
++        type: string
++      delete_workflow_pattern:
++        description: '要清理的工作流名称或文件名 (如果未设置，则针对所有工作流)'
++        required: false
++        type: string
++      delete_workflow_by_state_pattern:
++        description: '按工作流状态筛选: active, deleted, disabled_fork, disabled_inactivity, disabled_manually'
++        required: false
++        default: "ALL"
++        type: choice
++        options:
++          - "ALL"
++          - active
++          - deleted
++          - disabled_inactivity
++          - disabled_manually
++      delete_run_by_conclusion_pattern:
++        description: '按运行结论移除运行记录: action_required, cancelled, failure, skipped, success'
++        required: false
++        default: "ALL"
++        type: choice
++        options:
++          - "ALL"
++          - "Unsuccessful: action_required,cancelled,failure,skipped"
++          - action_required
++          - cancelled
++          - failure
++          - skipped
++          - success
++      dry_run:
++        description: '记录模拟的更改，不执行实际删除操作'
++        required: false
++        default: false
++        type: boolean
++
++jobs:
++  cleanup_workflow_runs:
++    name: 删除旧的工作流运行记录作业
++    runs-on: ubuntu-latest
++    permissions:
++      actions: write
++      contents: read
++    steps:
++      - name: 运行 Mattraks 删除工作流运行记录操作
++        uses: Mattraks/delete-workflow-runs@v2
++        with:
++          token: ${{ github.token }}
++          repository: ${{ github.repository }}
++          retain_days: ${{ github.event_name == 'schedule' && 0 || github.event.inputs.days }}
++          keep_minimum_runs: ${{ github.event_name == 'schedule' && 5 || github.event.inputs.minimum_runs }}
++          delete_workflow_pattern: ${{ github.event_name == 'schedule' && '' || github.event.inputs.delete_workflow_pattern }}
++          delete_workflow_by_state_pattern: ${{ github.event_name == 'schedule' && 'ALL' || github.event.inputs.delete_workflow_by_state_pattern }}
++          delete_run_by_conclusion_pattern: ${{ github.event_name == 'schedule' && 'ALL' || (startsWith(github.event.inputs.delete_run_by_conclusion_pattern, 'Unsuccessful:') && 'action_required,cancelled,failure,skipped' || github.event.inputs.delete_run_by_conclusion_pattern) }}
+           dry_run: ${{ github.event_name == 'schedule' && false || github.event.inputs.dry_run }}
+\ No newline at end of file
+diff --git a/.sukisu_last_known_version b/.sukisu_last_known_version
+index 2bdb2b4..2c1fb89 100644
+--- a/.sukisu_last_known_version
++++ b/.sukisu_last_known_version
+@@ -1 +1 @@
+-13089
++13089
+diff --git a/README.md b/README.md
+index f5f299d..33f8463 100644
+--- a/README.md
++++ b/README.md
+@@ -1,47 +1,63 @@
+-<h1 align="center">Build-your-own-kernel</h1>
+-
+-<p align="center">
+-  <b>基于 GKI 的 SukiSU Ultra 内核</b><br>
+-  <sub>参考大佬成果并在其基础上优化，自用内核工程</sub>
+-</p>
+-
+-<p align="center">
+-  <img src="https://img.shields.io/github/license/Celestials316/Build-your-own-kernel?style=flat-square">
+-  <img src="https://img.shields.io/github/stars/Celestials316/Build-your-own-kernel?style=social">
+-</p>
+-
+----
+-
+-## ✨ 项目介绍
+-
+-本项目是一个基于 **GKI 架构 + KernelSU（SukiSU Ultra 分支）** 的定制内核工程。  
+-参考了多位大佬的公开项目并结合实际需求进行了修改与整合，最终形成了当前的自用内核构建环境。
+-
+----
+-
+-## ⚙️ 特性一览
+-
+-- 支持构建kernelsu的分支 **SukiSU Ultra**
+-- 支持 GitHub Actions 云端自动构建
+-- 精简 defconfig，删除多余模块
+-- 可通过 AnyKernel3 封装快速刷入
+-
+----
+-
+-## 📦 使用方法
+-
+-### 1. 克隆仓库
+-
+-```bash
+-git clone https://github.com/Celestials316/Build-your-own-kernel.git
+-```
+-### 2. 使用 GitHub Actions 编译并刷入
+-
+----
+-
+-## 🙏 鸣谢 Thanks
+-
+-- [KernelSU](https://github.com/tiann/KernelSU)
+-- [SukiSU-Ultra](https://github.com/ShirkNeko/SukiSU-Ultra)
+-- 各位热心提供内核适配经验的大佬们！
+-- GitHub Actions 社区编译脚本模板贡献者
++<h1 align="center">Build-your-own-kernel</h1>
++
++<p align="center">
++  <b>基于 GKI 的 SukiSU Ultra 内核</b><br>
++  <sub>参考大佬成果并在其基础上优化，自用内核工程</sub>
++</p>
++
++<p align="center">
++  <img src="https://img.shields.io/github/license/Celestials316/Build-your-own-kernel?style=flat-square">
++  <img src="https://img.shields.io/github/stars/Celestials316/Build-your-own-kernel?style=social">
++</p>
++
++---
++
++## ✨ 项目介绍
++
++本项目是一个基于 **GKI 架构 + KernelSU（SukiSU Ultra 分支）** 的定制内核工程。  
++参考了多位大佬的公开项目并结合实际需求进行了修改与整合，最终形成了当前的自用内核构建环境。
++
++---
++
++## ⚙️ 特性一览
++
++- 支持构建kernelsu的分支 **SukiSU Ultra**
++- 支持 GitHub Actions 云端自动构建
++- 精简 defconfig，删除多余模块
++- 可通过 AnyKernel3 封装快速刷入
++- 集成 **SUSFS**（SukiSU `builtin` 分支），可选 lz4kd / lz4k_oplus 压缩算法
++
++---
++
++## 🧩 支持的内核版本
++
++| 系列 | 内核版本 | 说明 |
++| --- | --- | --- |
++| android12 / android13 | 5.10 | 旧版 GKI，走 `build/build.sh` |
++| android13 / android14 | 5.15 | 旧版 GKI，走 `build/build.sh` |
++| android14 | 6.1 | 旧版 GKI，走 `build/build.sh` |
++| android15 | 6.6 | Bazel(kleaf) 构建，推荐 2025-09 及之后的子版本 |
++| android16 | 6.12 | Bazel(kleaf) 构建，推荐 2025-09 及之后的子版本 |
++
++> 说明：SUSFS 内核补丁是对着 ACK **当前分支尖端**维护的，因此内核子版本越新，
++> 补丁越容易严格匹配；越老的子版本会退化为模糊匹配，存在补丁无法应用的风险。
++
++---
++
++## 📦 使用方法
++
++### 1. 克隆仓库
++
++```bash
++git clone https://github.com/Celestials316/Build-your-own-kernel.git
++```
++### 2. 使用 GitHub Actions 编译并刷入
++
++---
++
++## 🙏 鸣谢 Thanks
++
++- [KernelSU](https://github.com/tiann/KernelSU)
++- [SukiSU-Ultra](https://github.com/ShirkNeko/SukiSU-Ultra)
++- 各位热心提供内核适配经验的大佬们！
++- GitHub Actions 社区编译脚本模板贡献者
